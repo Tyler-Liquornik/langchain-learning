@@ -185,7 +185,10 @@ At this point, we can call `scrape_linkedin_profile` from our main file, and inp
   
 `ice_breaker.py`:  
 ```python  
-from langchain_core.prompts import PromptTemplate  from langchain_openai import ChatOpenAI  from dotenv import load_dotenv  from third_parties.linkedin import scrape_linkedin_profile    
+from langchain_core.prompts import PromptTemplate  
+from langchain_openai import ChatOpenAI  
+from dotenv import load_dotenv  
+from third_parties.linkedin import scrape_linkedin_profile    
     
 if __name__ == "__main__":    
     load_dotenv()    
@@ -205,3 +208,110 @@ if __name__ == "__main__":
     
     print(res)  
 ```
+
+## Going Agentic
+
+A common limitation of LLMs is their static training cut-off. To pull in fresh information you need an **agent** that can query live sources. LangChain agents do this through **tool calls**, for like a web-search API calls or a database queries. At each step while the agent is carrying out a task, its underlying LLM decides which tool to call next, receives the result, and repeats the cycle until it returns a final answer, in a **chain of thought** process.
+
+We can use an agent here to improve our current workflow, where instead of passing in a LinkedIn URL, we have the agent so a web search for it using just the persons name, introducing another layer of automation.
+
+Developing agents, we use LangChains `Tool` API. Among its parameters, `Tool` takes in:
+
+- `name: str` a name to identify the tool, referenced by the LLM to identify it
+- `description: str`, this description is very important to guides the model on when and how to call the tool
+- `func: Callable[..., str]` (equivalent to `Function<Object[], String>` in Java), the function to run when the tool is called.
+
+We're also going to use one of LangChains pre-built agent types, which for us will be a **ReAct** agent in this course, with the name coming from the relationship between agentic reasoning and acting. The ReAct algorithm is based on the idea of a 3 step iterative process:
+
+1. **Think**: writes a short thought, describing what it needs next.
+2. **Act**: issues an action that triggers a tool call
+3. **Observe**: reads the tool’s output, then loops back to Thought.
+
+To ReAct, we simply pull from LangChains's hub to get the widely used [ReAct prompt](# You can find it at: https://smith.langchain.com/hub/hwchase17/react) written by one of the LangChain co-founders, Harrison Chase. Here's what our agent looks like:
+
+`agents/linkedin_lookup_agent.py`:
+```python
+import os  
+from dotenv import load_dotenv  
+from langchain_openai import ChatOpenAI  
+from langchain_core.prompts import PromptTemplate  
+from langchain_core.tools import Tool  
+from langchain.agents import (create_react_agent, AgentExecutor)  
+from langchain import hub  
+  
+def lookup(name: str) -> str:  
+	load_dotenv()
+	
+    llm = ChatOpenAI(temperature=0, model="gpt-4o-mini")  
+  
+    template = """given the full name of {name_of_person} I want you to get me a link to their LinkedIn profile page. You must obtain their profile home page, and not a post by them. Your answer should only have a URL, and nothing else"""
+    prompt_template = PromptTemplate(input_variables=["name_of_person"], template=template)  
+  
+    tools = [  
+        Tool(  
+            name="Crawl Google for Linkedin profile page",  
+            func="?", # Placeholder for now  
+            description="useful for when you need to get a LinkedIn profile page URL",  
+        )  
+    ]  
+  
+    # This prompt comes from the Co-Founder of LangChain     
+    react_prompt = hub.pull("hwchase17/react")  
+  
+    agent = create_react_agent(llm=llm, tools=tools, prompt=react_prompt)  
+    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)  
+    result = agent_executor.invoke(  
+        input={"input": prompt_template.format_prompt(name_of_person=name)}  
+    )  
+  
+    return result["output"]  
+  
+if __name__ == "__main__":  
+    linkedin_url = lookup("Satya Nadella")
+```
+
+Now we're gonna need another third party integration to give our LLM access to search the web. For this project, we'll use a service called [Tavily](https://www.tavily.com/), a search API optimized for LLMs & RAG, and write a small function to call their search API.
+
+`tools/tools.py`:
+```python
+from langchain_community.tools.tavily_search import TavilySearchResults  
+  
+def get_profile_url_tavily(name: str) -> str:  
+    """Searches for a LinkedIn Profile Page URL from a person's name"""  
+  
+    search = TavilySearchResults()  
+    return search.run(name)
+```
+
+Then, if we replace `func=get_profile_url_tavily` in our original function, the agent has the ability to call on the search tool when it sees fit. Running `linkedin_lookup_agent`, there is something VERY IMPORTANT to note here. LangChain’s `react_single_input` parser looks for the chain of thought tags `Thought: ... Action: ... Action Input: ... Observation` verbatim. When it can’t find them, it raises an OutputParserException, which crashes the chain. It's up to the LLM ultimately to produce these tags based on the ReAct system prompt we pulled from LangChain's hub, which means *weak models can create very brittle workflows*. In my testing for this, `gpt-4.1-nano` OFTEN CRASHED when I tried, and even when it didn't it could not properly follow instructions and basically never gave just a URL, and gave the whole tool call output. Replacing it with `gpt-4o-mini`, it ALMOST ALWAYS WORKED with correct output. This goes to show how choosing the right model and testing output is absolutely key. There are more options to play around with that allow retrying, and different forms of parsing, but ultimately model selection must be done with care.
+
+Now, connecting everything back in our primary driver file with both Scrapin and Tavily, and doing some refactoring we have a working program to enter someones name and get some info about them (assuming they have a LinkedIn):
+
+`ice_breaker.py`:
+```python
+from langchain_core.prompts import PromptTemplate  
+from langchain_openai import ChatOpenAI  
+from dotenv import load_dotenv  
+from third_parties.linkedin import scrape_linkedin_profile  
+from agents.linkedin_lookup_agent import lookup as linkedin_lookup_agent  
+  
+def ice_break_with(name: str):  
+    linkedin_url = linkedin_lookup_agent(name=name)  
+    linkedin_profile = scrape_linkedin_profile(linkedin_profile_url=linkedin_url)  
+  
+    summary_template = """  
+          given the information {information} about a person, I want you to create:          1. a short summary          2. two interesting facts about them      """  
+    summary_prompt_template = PromptTemplate(input_variables=["information"], template=summary_template)  
+    llm = ChatOpenAI(temperature=0.7, model="gpt-4o-mini")  
+  
+    chain = summary_prompt_template | llm  
+    res = chain.invoke(input={"information": linkedin_profile})  
+    print(res)  
+  
+  
+if __name__ == "__main__":  
+    load_dotenv()  
+    person_name = input("Break the Ice With: ")  
+    print(ice_break_with(name=person_name))
+```
+
