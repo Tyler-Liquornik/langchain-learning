@@ -314,4 +314,209 @@ if __name__ == "__main__":
     person_name = input("Break the Ice With: ")  
     print(ice_break_with(name=person_name))
 ```
+## LangSmith for Observability
+
+[LangSmith](https://www.langchain.com/langsmith) is a great tool that allows us to monitor, debug, and evaluate our LLM chains and agent runs in real time. We can see prompts, chain of thought, responses, token usage, latency, and errors in a single dashboard.
+
+To use LangSmith to trace our LLM usage, we'll need to set both env vars `LANGCHAIN_TRACING_V2=true` and `LANGCHAIN_API_KEY=<api-key>` generated from the [LangSmith dashboard](https://smith.langchain.com). LangSmith comes with LangChain, but it could be used independently (in the case you write your own AI vendor clients and agents from scratch), in which case we'd need to also `pip install langsmith`. Next, we'll also set env var `LANGCHAIN_PROJECT = <Project Name>` which will be the project name displayed in the LangSmith dashboard, lets use `LANGCHAIN_PROJECT=ice-breaker`.
+
+Now, LangSmith is enabled, and we can peek into all the trace metrics observed from our `AgentExecutor` runtime:
+
+![](images/langsmith-tracing.png)
+Notice though how we get observability with Tavily since its an official LangSmith integration package we are using, while we don't get that for Scrapin because we aren't using an integration, rather just hitting their API endpoint.
+
+## Setting up a Vector Database
+
+For this section, we're going to start a new project to analyze a *blog page about Pinecone*, and we'll be be able to chat with it.
+
+Lets start by installing all the dependencies we need. 
+- `langchain`
+- `langchain-openai`
+- `python-dotenv
+- `langchainhub`
+- `black`
+- `langchain-pinecone`
+
+Our plan here is going to be to take store a Medium article in **Pinecone** as vectors, so that we can chat with it using RAG. We do this in steps, with each step having a LangChain API:
+- Load the document in question, our Medium blog => `TextLoader`
+	- There are document loader implementations for many different kinds of documents aside from text like we'll use here. They come from [langchain-community](https://github.com/langchain-ai/langchain-community/tree/main/libs/community/langchain_community/document_loaders).
+- Split the document into chunks => `TextSplitter`
+	- Without chunking, the data often wont fit into the LLM's context window. The challenge is to keep semantically related parts of the document together in the chunks.
+	- Chunks typically have some overlap as well, to keep context between chunks
+	- Chunk sizing & separation is NOT TRIVIAL to decide, and something that we must play around with depending on the size, semantics, formatting, etc. of our documents.
+- Embed each chunk as a vector => `OpenAIEmbeddings`
+	- Similar chunks are close in the abstract vector space (closeness as defined by whatever similarity algorithm, e.g. cosine/euclidean)
+- Store vectors in Pinecone => `PineconeVectorStore`
+	- Document chunk vectors are also usually paired with metadata
+
+![](images/vector-store-initialization.png)
+
+To use [Pinecone](https://www.pinecone.io/), we'll need to sign up first. then we'll create a new index, which is the container that stores our vector embeddings and defines the similarity search algorithm. There are pre-configured text embedding models that vary in their specs, we'll use OpenAI's `text-embedding-3-small`, with 1536-dimensional vectors using cosine similarity search. This small embedding model will be more cost efficient than better models. We'll also choose to setup with AWS as our underlying cloud provider.
+
+> Cosine similarity is most commonly used over other similarity algorithms, because as we know from linear algebra, it only measures angle and not magnitude. This is useful in NLP because vector magnitude loosely might map to the length of the text or word frequency, while angle / direction loosely maps to the semantic meaning, and we more often care about semantic search for matching similar vectors rather than magnitude.
+> Recall: $\cos(\theta) = \frac{\vec{A} \cdot \vec{B}}{ \| \vec{A} \| \| \vec{B} \| }$, $\| \vec{X} \| = \sqrt{ \sum_{i=1}^n x_i^2 }$
+
+![](images/pinecone-dashboard.png)
+
+Next, we'll add the name of the index to env var `INDEX_NAME`, and our Pinecone api key to `PINECONE_API_KEY`.For this project the index name will be `INDEX_NAME=medium-blog-embeddings-index`.
+
+Now, lets get into the implementation. 
+
+Starting with imports, to give access to all the packages we installed
+
+`ingestion.py (snippet)`:
+```python
+import os  
+from dotenv import load_dotenv  
+from langchain_community.document_loaders import TextLoader  
+from langchain_text_splitters import CharacterTextSplitter  
+from langchain_openai import OpenAIEmbeddings  
+from langchain_pinecone import PineconeVectorStore
+```
+
+For Text loader, initializing a document is as simple as:
+
+`ingestion.py (snippet)`:
+```python
+loader = TextLoader("/Users/tylerliquornik/Desktop/learning/langchain-learning/blog-analyzer/mediumblog1.txt")  
+document = loader.load()
+```
+
+Even though in our case we have one document, `loader.load()` is going to return a `list[Document]`, in which case right now of course `len(document) = 1`. A `Document` has two key properties you should know about:
+
+ - `page_content: str`, the loaded text content that we will chunk and embed
+ - `metadata: dict`   
+    - `source: str`, filename or URL
+    - `page: int`, for multi-page documents
+    - `chatper: int`, for multi-chapter documents
+    - `chunk: int`: which split this came from (useful if you split a long file)
+    - `score: float`: similarity score when returned by a vector retriever
+
+Metadata is crucial for a number of reasons, like so the LLM can trace a documents origin, filter/rank retrieved chunks, generate precise citations in LLM responses, and letting agentic chains or tool-invoking workflows decide which context to use. `Document` gets reused across the RAG pipeline, which is why we have the `chunk` and `score` properties.
+
+Next, we'll chunk up the data using `CharacterTextSplitter`.
+
+`ingestion.py (sinppet)`:
+```python
+text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0) 
+chunks = text_splitter.split_documents(document)
+```
+
+> Note: The `chunks` that we get out of this are also a `list[Document]`.
+
+`chunk_size` and `chunk_overlap` are the two most important arguments that any `TextSplitter` needs. Here's a little more info on the impact they have on our RAG pipeline, and their specific implementations in `CharacterTextSplitter`:
+
+- `chunk_size: int` The maximum number of characters per chunk.
+    - Smaller (~500-1000): more granular chunks, potentially better retrieval accuracy but higher embedding costs since there are more total chunks to embed, and its more overhead to manage.
+    - Larger (~1000-2000+): fewer chunks, faster ingestion, but potentially less precise retrieval. 
+    - A good heuristic: we should select a chunk small enough that enough chunks fit in the LLM's context window, but large enough so that as humans, if we read the chunk it would have relevant semantic meaning. 
+	    - Now, we don't want too many chunks retrieved either, because at that point it starts to muddy output quality when we have too much information in the context window. We want to rather be strategic and have a balance of not too much context, keeping context relevant so latency and costs are lower.
+	- We can occasionally get some chunks that are not exactly the size we specify, because the splitter respects separators and end-of-document remainders (and may strip whitespaces), and this means some chunks end up shorter/longer than `chunk_size`, so our ingestion and retrieval logic must be aware of and handle variable-length chunks.
+- `chunk_overlap: int` The number of characters overlapping between consecutive chunks.
+    - 0: No overlap, efficient, but may split context needed for coherent retrieval. This may cut sentences or concepts into parts though and decrease the system's quality.
+    - ~50-200: Commonly used overlap ensures related information stays connected across splits, improving retrieval coherence, at the cost of redundancy and slightly more storage/embedding cost.
+
+Next up, we'll setup our embeddings using `OpenAIEmbeddings`
+
+`ingestion.py (sinppet):`
+```python
+embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
+```
+
+Choosing an embedding model `model` impacts the system’s accuracy, cost, and infrastructure needs. Newer models like `text-embedding-3-small` offer substantial performance gains over `text-embedding-ada-002` at a fraction of the cost, while larger variants such as `text-embedding-3-large` boost retrieval quality further but increase compute and storage demands. Cohere also has a number of popular embedding models as well.
+- `text-embedding-3-small` uses 1536-dimensional vectors, balancing expressiveness and compactness.
+- `text-embedding-3-large` doubles that to 3072 dimensions, capturing richer semantic nuances but doubling vector storage per embedding which increases costs.
+
+Finally, we can initialize our `PineconeVectorStore` using our `chunks` and `embedding_model`, and its setup and ready to use for RAG:
+
+`ingestion.py (sinppet):`
+```python
+PineconeVectorStore.from_documents(chunks, embedding_model, index_name=os.environ["INDEX_NAME"])
+```
+
+After we run `ingestion.py`, we can go into the Pinecone dashboard, and it will autopopualte a test search of a chunk and we'll get to see a similarity search in action!
+
+![](images/pinecone-similarity-search.png)
+
+
+## Retrieving From a Vector Database
+
+Now that our vector database is setup with pinecone, we want to make use of our stored vectors in a RAG pipeline called between a query and response:
+
+- Retrieve context: Send the query as an embedding to Pinecone.
+	- Pinecone returns the top-k most similar document chunks (with their metadata and similarity scores).
+- Assemble context
+    - Sort and filter retrieved chunks (e.g. by score threshold).
+    - Stitch their text together, preserving order or relevance.
+    - Optionally include source info or chunk identifiers for traceability.
+- Prompt LLM
+    - Insert the assembled context and the original question into your prompt template.
+    - Call the language model with that retrieval augmented prompt
+
+![](images/rag-pipeline.png)
+
+Lets start off again with imports:
+
+`rag.py`:
+```python
+import os  
+from dotenv import load_dotenv  
+from langchain_core.prompts import PromptTemplate  
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI  
+from langchain_pinecone import PineconeVectorStore  
+from langchain import hub  
+from langchain.chains.combine_documents import create_stuff_documents_chain  
+from langchain.chains.retrieval import create_retrieval_chain
+```
+
+Here we have two new functions we make use of. `create_stuff_documents_chain` for building the prompt with retrieved content (and used for "stuffing" it with documents) and `create_retrieval_chain` for wrapping the retriever & LLM into a full RAG pipeline.
+
+Now, I want to start off with a query without RAG to demonstrate the difference, using a purposely slightly vague prompt to simulate real potential user input: `"Briefly tell me about Pinecone"`.
+
+`no-rag.py`:
+```python
+load_dotenv()  
+  
+if __name__ == "__main__":  
+    print("Retrieving...")  
+  
+    embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")  
+    llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo")  
+  
+    query = "Briefly tell me about Pinecone"  
+    chain = PromptTemplate.from_template(template=query) | llm  
+    result = chain.invoke(input={})  
+    print(result.content)
+```
+
+Running this query, I got the answer: `Pinecone is a market research company that specializes in collecting and analyzing consumer opinions and feedback`. 
+
+Lets build up our RAG pipeline and show how we can inform `gpt-3.5-turbo` by pulling from our vector store index.
+
+`rag.py`:
+```python
+load_dotenv()  
+  
+if __name__ == "__main__":  
+    print("Retrieving...")  
+  
+    llm = ChatOpenAI(model="gpt-3.5-turbo")  
+  
+    embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")  
+    vector_store = PineconeVectorStore(index_name=os.environ["INDEX_NAME"], embedding=embedding_model)  
+  
+    query = "Briefly tell me about Pinecone"  
+    retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")  
+    combine_docs_chain = create_stuff_documents_chain(llm=llm, prompt=retrieval_qa_chat_prompt)  
+    retrieval_chain = create_retrieval_chain(retriever=vector_store.as_retriever(), combine_docs_chain=combine_docs_chain)  
+    result = retrieval_chain.invoke(input={"input": query})  
+  
+    print(result['answer'])
+```
+
+Now I get a more contextually relevant answer: `Pinecone is a fully managed cloud-based vector database designed for efficient retrieval of similar data points based on their vector representations. It is fast, scalable, and user-friendly, supporting real-time updates and high query throughput with low latency search capabilities. Pinecone provides infrastructure management, is secure, and can easily integrate into existing ML workflows.
+
+Now, if we have a look at LangSmith, we can see everything going on in the chain. We can see that 4 documents (chunks) were added as context to our prompt. This is the power of RAG: we retrieved relevant chunks, so only a fraction of the original blog being is used as context, saving us on LLM costs!
+
+![](images/langsmith-rag.png)
 
