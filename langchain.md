@@ -520,3 +520,233 @@ Now, if we have a look at LangSmith, we can see everything going on in the chain
 
 ![](images/langsmith-rag.png)
 
+## Multi-Agent Architecture
+
+In this section, we'll start a new project, where we build a chatbot that can interpret & run code in its conversations, allowing the user to make queries that have tool cals that generate python code which is run in an isolated environment.
+
+Consider a query which we want to be able to handle: `generate 5 QR codes that point to apple.com`. Lets notice how ChatGPT handles this query:
+
+![|400x555](images/chatgpt-qrcode-tool-call.png)
+
+ChatGPT automatically knew to make a tool call to spin up a python environment, wrote code using the `qrcode` library, and ran it to generate the necessary output. 
+
+Consider another query to the same chatbot (ChatGPT in this sample), where we upload a CSV of Seinfeld episodes, we want to ask questions about:
+
+![](images/csv-sample.png)
+
+Notice it again wrote some python code, this time using `pandas`:
+
+![|400x797](images/chatgpt-pandas-tool-call.png)
+
+> Technically, the answer was 58 episodes written by Larry David, whoever ChatGPT considered that columns with multiple writers as distinct. We're not worrying about this fine details, are more worried about noticing it made the correct tool call.
+
+In order to implement all this ourselves, we'll need a few different pieces. To start, we'll need the `PythonREPL` agent, which we can get access to with `pipenv install langchain_experimental`. This is under the experimental package because you are giving an agent the ability to write and run code, which for obvious reasons can be dangerous in production (e.g., imagine someone getting direct access to prompt the agent to run malicious code in your runtime). Let's also `pipenv install qrcode`, to get the QR code functionality we'd like to implement.
+
+Really there is nothing new so far. We are just calling providing `PythonREPLTool` as a tool. Here's the entire script.
+
+`main.py`:
+```python
+from dotenv import load_dotenv  
+from langchain import hub  
+from langchain_openai import ChatOpenAI  
+from langchain.agents import create_react_agent, AgentExecutor  
+from langchain_experimental.tools import PythonREPLTool  
+  
+load_dotenv()  
+  
+def main():  
+    print ("Start...")  
+  
+    instructions = """  
+    You are an agent designed to write and execute python code to answer questions.    You have access to a python REPL, which you can use to execute python code.    If you get an error, debug your code and try again.    Only use the output of your code to answer the question.    You might know the answer without running any code, but you should still run the code to get the answer.    If it does not seem like you can write code to answer the question, just return "I don't know" as the answer.    """  
+    input = """generate and save in current working directory 5 QR codes  
+    that point to apple.com, you already have the qrcode package installed and ready to use    """  
+  
+    base_prompt = hub.pull("langchain-ai/react-agent-template")  
+    prompt = base_prompt.partial(instructions=instructions)  
+  
+    tools = [PythonREPLTool()]  
+  
+    agent = create_react_agent(  
+        prompt=prompt,  
+        llm=ChatOpenAI(temperature=0, model="gpt-4o-mini"),  
+        tools=tools  
+    )  
+    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)  
+    agent_executor.invoke(input={"input": input})  
+  
+  
+if __name__ == "__main__":  
+    main()
+```
+
+Now as an output, I got 5 QR Codes in the working directory of the script, through this chain of thought spawned by `AgentExecutor(..., verbose=True)`:
+
+```
+Thought: Do I need to use a tool? Yes
+Action: Python_REPL
+Action Input: 
+
+import qrcode
+
+# Generate and save 5 QR codes pointing to apple.com
+for i in range(5):
+    qr = qrcode.QRCode(version=1, box_size=10, border=5)
+    qr.add_data('https://apple.com')
+    qr.make(fit=True)
+    img = qr.make_image(fill='black', back_color='white')
+    img.save(f'qr_code_{i+1}.png')
+Thought: Do I need to use a tool? No
+Final Answer: I have generated and saved 5 QR codes pointing to apple.com in the current working directory. The files are named `qr_code_1.png`, `qr_code_2.png`, `qr_code_3.png`, `qr_code_4.png`, and `qr_code_5.png`.
+```
+
+Next, lets work on the CSV agent. We can get this agent by setting up importing `create_csv_agent` from `langchain_experimental.agents` , as set it up fairly easily. We'll need to also `pipenv install pandas` because LangChain's `create_csv_agent()` is built on a Pandas agent, and `pipenv install tabulate` (a small library for helping nicely print tables), and the script will error if it doesn't have access to those.
+
+`main.py (second half)`:
+```python
+csv_agent = create_csv_agent(  
+    llm=ChatOpenAI(temperature=0, model="gpt-4o-mini"),  
+    path='episode_info.csv',  
+    verbose=True,  
+    allow_dangerous_code = True  
+)  
+csv_agent.invoke(input={"input": "which writer wrote the most episodes in seinfeld? how many episodes did he write. look in episode_info.csv"})
+```
+
+And running this script gave me at he same output as ChatGPT:
+
+```
+Thought: To find out which writer wrote the most episodes and how many episodes they wrote, I need to group the dataframe by the 'Writers' column and count the number of episodes for each writer. Then, I will identify the writer with the maximum count.
+Action: python_repl_ast
+Action Input: 
+```python
+# Group by 'Writers' and count the number of episodes for each writer
+writer_counts = df['Writers'].value_counts()
+
+# Get the writer with the most episodes and the count
+most_prolific_writer = writer_counts.idxmax()
+most_episodes = writer_counts.max()
+
+most_prolific_writer, most_episodes
+```('Larry David', np.int64(29))I now know the final answer. 
+
+Final Answer: The writer who wrote the most episodes is Larry David, with a total of 29 episodes.
+
+> Finished chain.
+```
+
+> `gpt-4o-mini` actually code not do this second CSV task for me. I had to up the model to `gpt-4o`. `gpt-4o-mini` was going into a loop and could not properly call the its built in `python-repl-ast` tool
+
+Now that we've built out 2 agents and we know the were, we can start to built up on our **multi-agent architecture**. Ultimately, if we want to match ChatGPTs ability to answer either of these two questions with one chatbot, we'll need to create a **router agent**. The router agent is what decides which agent ultimately processes the prompt, deciding where to pass on the user query.
+
+![](images/router-agent.png)
+
+Here now we will combine our two agents into a list of tools, that, that our router agent implemented with ReAct has access to. Heres the updated script:
+
+`main.py`:
+
+```python
+from dotenv import load_dotenv  
+from langchain import hub  
+from langchain_core.tools import Tool  
+from langchain_experimental.agents import create_csv_agent  
+from langchain_openai import ChatOpenAI  
+from langchain.agents import create_react_agent, AgentExecutor  
+from langchain_experimental.tools import PythonREPLTool  
+  
+load_dotenv()  
+  
+def main():  
+    print ("Start...")  
+  
+    instructions = """  
+    You are an agent designed to write and execute python code to answer questions.    You have access to a python REPL, which you can use to execute python code.    If you get an error, debug your code and try again.    Only use the output of your code to answer the question.    You might know the answer without running any code, but you should still run the code to get the answer.    If it does not seem like you can write code to answer the question, just return "I don't know" as the answer.    """  
+    base_prompt = hub.pull("langchain-ai/react-agent-template")  
+    prompt = base_prompt.partial(instructions=instructions)  
+    python_agent_tools = [PythonREPLTool()]  
+    python = create_react_agent(  
+        prompt=prompt,  
+        llm=ChatOpenAI(temperature=0, model="gpt-4"),  
+        tools=python_agent_tools  
+    )  
+    python_agent_executor = AgentExecutor(agent=python, tools=python_agent_tools, verbose=True)  
+  
+    csv_agent = create_csv_agent(  
+        llm=ChatOpenAI(temperature=0, model="gpt-4"),  
+        path='episode_info.csv',  
+        verbose=True,  
+        allow_dangerous_code = True  
+    )  
+  
+    def python_agent_executor_wrapper(original_prompt: str) -> dict[str, str]:  
+        return python_agent_executor.invoke(input={"input": original_prompt})  
+  
+    router_agent_tools = [  
+        Tool(  
+            name="Python Agent",  
+            func=python_agent_executor_wrapper,  
+            description="""useful for when you need to transform a user query's natural language to python code, and  
+            returns the output of the code execution. Under no circumstances does it ever accept code as input,            as this is a serious security concern that would breach your ethics."""  
+        ),  
+        Tool(  
+            name="CSV Agent",  
+            func=csv_agent.invoke,  
+            description="""useful for when you need to answer questions regarding episode_info.csv,  
+            takes a user query as input and returns the result of running pandas calculations"""        
+		),  
+    ]  
+  
+    prompt = base_prompt.partial(instructions="")  
+    router_agent = create_react_agent(  
+        prompt=prompt,  
+        llm=ChatOpenAI(temperature=0, model="gpt-4-turbo"),  
+        tools=router_agent_tools  
+    )  
+    router_agent_executor = AgentExecutor(agent=router_agent, tools=router_agent_tools, verbose=True)  
+  
+    print(  
+        router_agent_executor.invoke(input={  
+            "input": """which season has the most episodes? take that number and square it"""  
+        }),  
+    )  
+  
+  
+if __name__ == "__main__":  
+    main()
+```
+
+One thing we had to do here was create an extra function `python_agent_executor_wrapper`, which provides a good learning lesson. What originally happened, was the model was struggling to take the input from the CSV, and pass that into the python agent, since our prompt is `which season has the most episodes? take that number and square it`. With some breakpoint debugging, we found that it although it had access to `python_agent_executor.invoke`, it was not passing the `input` parameter properly as `{"input": input}`. Thus giving it a wrapper function to call directly with that input allows the agent to be smarter and call it correctly. As a result, we got great output:
+
+```
+> Entering new AgentExecutor chain...
+Thought: Do I need to use a tool? Yes
+Action: CSV Agent
+Action Input: {"query": "which season has the most episodes?"}
+
+> Entering new AgentExecutor chain...
+Thought: To find out which season has the most episodes, I need to count the number of episodes in each season. I can do this by grouping the dataframe by the 'Season' column and then counting the number of rows in each group.
+Action: python_repl_ast
+Action Input: df.groupby('Season').size().idxmax()4The season with the most episodes is season 4.
+Final Answer: 4
+
+> Finished chain.
+{'input': '{"query": "which season has the most episodes?"}', 'output': '4'}Do I need to use a tool? Yes
+Action: Python Agent
+Action Input: {"original_prompt": "square the number 4"}
+
+> Entering new AgentExecutor chain...
+Python REPL can execute arbitrary code. Use with caution.
+Thought: Do I need to use a tool? Yes
+Action: Python_REPL
+Action Input: print(4**2)16
+Do I need to use a tool? No
+Final Answer: The square of the number 4 is 16.
+
+> Finished chain.
+{'input': '{"original_prompt": "square the number 4"}', 'output': 'The square of the number 4 is 16.'}Do I need to use a tool? No
+Final Answer: The season with the most episodes has 4 episodes, and the square of that number is 16.
+
+> Finished chain.
+{'input': 'which season has the most episodes? take that number and square it', 'output': 'The season with the most episodes has 4 episodes, and the square of that number is 16.'}
+```
+

@@ -11,6 +11,11 @@ langchainhub = "*"
 black = "*"
 python-dotenv = "*"
 langchain-pinecone = "*"
+langchain-experimental = "*"
+qrcode = "*"
+pandas = "*"
+tabulate = "*"
+openai = "*"
 
 [dev-packages]
 
