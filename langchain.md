@@ -750,3 +750,133 @@ Final Answer: The season with the most episodes has 4 episodes, and the square o
 {'input': 'which season has the most episodes? take that number and square it', 'output': 'The season with the most episodes has 4 episodes, and the square of that number is 16.'}
 ```
 
+## Intro to LangGraph
+
+Note: You should probably read about [LangChain](./langchain) & [LangChain Agents](./langchain-agents) first before reading this.
+
+LangGraph allows modelling multi-agent systems as workflows state machines, providing a powerful way of building AI systems. The key thing that the directed graphs that underlie state machines give us that straight chain workflows and router agents don't, is the ability to have cyclical workflows, giving structure to repeat workflows. Completely autonomous agents without a defined graph workflow can also do this, but are often too unreliable for production usage, facing issues like they can get stuck in loops calling the same tool endlessly. Graph workflows sit in the middle, defining how the agent can move between and repeat steps but ultimately the LLM decides which paths to take on that workflow, using tool calls.
+
+![](images/chain-vs-agent.png)
+
+When defining our graph we have a couple of core ideas:
+
+- **Nodes**: Define python functions, or tools
+- **Edges**: Define a singular directed edge from a Node A to B
+- **Conditional Edges**: Define multiple directed edges from one node, with a tool call defining how the LLM should decide which edge to proceed down
+- **State**: a dictionary passed the workflow that can be written to and read from by nodes.
+
+Nodes must always have the signature:
+
+`def f(state: GraphState) -> Dict[str, Any]`
+
+A node takes in the current `GraphState` (a wrapper around a dictionary with the state), and then outputs a dictionary of whatever state is changed, which will be automatically then slotted into `GraphState` for the next node to use.
+
+## Implementing ReAct with LangGraph
+
+Earlier, we saw the power of the ReAct framework for creating autonomous agents. We did this earlier using prompt engineering, but when this ends up being very brittle. Using LangGraph to define the ReAct chain of thought cycle will allow us to improve the result, and also customize other features into the workflow too. The graph for a ReAct agent looks like:
+
+![|250x307](images/react-agent-graph.png)
+
+Our end goal will be to be able to answer the question: `What is triple the current temperature in Toronto?` 
+
+The only new package we'll be using in this section not seen before in learnings on [LangChain](./langchain) & [LangChain Agents](./langchain-agents) is LangGraph itself, which we can start off or project by installing with `pipenv install langgraph`.
+
+Next, lets setup the LLM and the tools:
+
+`llm.py`:
+```python
+from dotenv import load_dotenv  
+from langchain_community.tools import TavilySearchResults  
+from langchain_core.tools import tool  
+from langchain_openai import ChatOpenAI  
+  
+load_dotenv()  
+  
+@tool  
+def triple(num: float) -> float:
+	"""Multiply a number by 3"""
+    return num * 3  
+  
+tools = [triple, TavilySearchResults(max_results=1)]  
+  
+llm = (ChatOpenAI(temperature=0, model="gpt-4o-mini")  
+       .bind_tools(tools))
+```
+
+Something you'll notice we did differently than before is that we used the `@tool` decorator. This automatically handles setting up the function it decorates as a tool, meaning we don't need to use the `Tool` constructor manually. `@tool` creates the tool using the function name as the `name`, the function docstring as the `description`, and the function reference as `func`. It also automatically creates a Pydantic schema for a parameter `args_schema` which we didn't discuss before, which is useful for  `ValidationError` propagation instead of silent failed tool calls. 
+
+We also used `.bind_tools` to attach our tools directly to the LLM because we’re building an agent from scratch, one layer below the `create_react_agent` prebuilt agent abstraction.
+
+Next, we'll create the two graph nodes we need, for reasoning and acting:
+
+`nodes.py`:
+```python
+from dotenv import load_dotenv  
+from langgraph.graph import MessagesState  
+from langgraph.prebuilt import ToolNode  
+from react import llm, tools  
+  
+load_dotenv()  
+  
+SYSTEM_PROMPT="""  
+You are a helpful assistant that can use tools to answer questions.  
+"""  
+  
+def reason_node(state: MessagesState) -> MessagesState:  
+    """  
+    Run the agent reasoning    
+    """    
+    response = llm.invoke([{"role": "system", "content": SYSTEM_PROMPT}, *state["messages"]])  
+    return {"messages": [response]}  
+  
+act_node = ToolNode(tools)
+```
+
+Here, we conveniently used `MessagesState`, which is a common use case where the graph state should contain a list of messages. `MessagesState` simply adds a message list mapped to the `messages` key within the `state` field. We also used `ToolNode` which we have used to group our tools together so that the ReAct agent's "act" step is contained in one node. 
+
+There are different roles for messages, including `HumanMessage`, `SystemMessage`, and `AIMessage`. Each contain the field `content`, and `AIMessage` has a few extra fields like `tool_calls` that we will use to decide how the LLM should should proceed for our ReAct agent. namely, to check if we should continue reasoning, we check if the last message is a tool call. Let's use that idea to put together our graph:
+
+`main.py (skipped imports)`:
+```python
+REASON = "reason"  
+ACT = "act"  
+  
+# If the last message is not a tool call, end, otherwise act  
+def should_continue(state: MessagesState) -> str:  
+    if not state["messages"][-1].tool_calls: return END  
+    return ACT  
+  
+# Build the graph  
+graph = StateGraph(MessagesState)  
+graph.add_node(REASON, reason_node)  
+graph.add_node(ACT, act_node)  
+graph.add_edge(START, REASON)  
+graph.add_edge(ACT, REASON)  
+graph.add_conditional_edges(REASON, should_continue, {  
+    END: END, # Mapping should_continue outputs to node names  
+    ACT: ACT  # We use the same names, so the key & val is the same 
+})
+app = graph.compile()
+```
+
+At this point, we can use a tool called Mermaid to visualize our graph very easily, and see what it looks like to make sure its correct with:
+
+```
+app.get_graph().draw_mermaid_png(output_file_path="graph.png")
+```
+
+And the output of this will actually be the exact graph we were looking to build!
+
+Finally, we just can call on our app:
+
+`main.py (driver)`:
+```python
+if __name__ == "__main__":  
+    print("Hello LangGraph world!")  
+    res = app.invoke({"messages": [HumanMessage(content="What is triple the current temperature in Toronto?")]})  
+    print(res["messages"][-1].content)
+```
+
+And we got the correct output: `The current temperature in Toronto is approximately 26°C. Triple that temperature is 78°C.`
+
+

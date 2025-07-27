@@ -16,6 +16,7 @@ qrcode = "*"
 pandas = "*"
 tabulate = "*"
 openai = "*"
+langgraph = "*"
 
 [dev-packages]
 
