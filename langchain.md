@@ -880,3 +880,199 @@ if __name__ == "__main__":
 And we got the correct output: `The current temperature in Toronto is approximately 26°C. Triple that temperature is 78°C.`
 
 
+> Note: You should probably read about [LangChain](./langchain) and [LangChain Agents](./langchain-agents) first before reading this.
+## What is MCP?
+
+**MCP (Model Context Protocol)** is a protocol created by Anthropic that lets AI models discover, understand, and safely invoke tools, resources, and prompt dynamically, rather than relying on static API definitions. MCP is is similar idea to OpenAPI. Unlike OpenAPI which documents endpoints ahead of time for developers, MCP provides structured metadata, schemas, and interaction patterns specifically designed for LLMs, so the model can decide what to call, how to call it, and what to do next in an agentic loop. MCP prevents the need to write API integrations for every individual agents, providing a standardized way to integrate with all of them at once. This is called the M×N problem (M agents, N APIs), and MCP reduces the number integrations you need to develop from M×N to M+N (M agents integrate with one MCP server that has N API integrations). On top of that, many of those N API integrations have OOTB implementations from their providers, and many API providers also maintain their own MCP servers.
+
+![](./images/mcp-m-times-n-solution.png)
+
+![](./images/mcp-architecture.png)
+
+![](./images/mcp-interfaces.png)
+
+One unique feature MCP has that really takes it beyond "OpenAPI designed for LLMs" is called **Sampling**. Sampling creates a two-way channel between an MCP server and MCP client allowing the server to actively request the model to generate content, reason about data, or transform inputs as part of a tool execution flow. Instead of the client always driving the interaction, the server can “pull in” the model when needed, enabling more dynamic, collaborative workflows where tools and the model interleave their responsibilities. This does however have security and privacy risks though.
+
+Another emerging topic in MCP is that there are registries and directories where MCP servers can be discovered and shared, similar in spirit to package repositories like Maven Central or npm. However, there is no single official MCP registry, and concepts like verification of these third parties is handled by these platforms. There is not yet one standardized place for this, there are several emerging competing registries.
+
+## Administrating an MCP Server
+
+Let's run a simple demo to invoke tools over MCP running on an MCP server. We'll use a pre-built MCP server called **mcpdoc** to make our life easier and focus on the protocol, not writing an MCP server yet.
+
+ `mcpdoc` is an MCP server developed by the LangChain team that enables AI agents to discover and search through web-based documentation in a structured way. It can leverage conventions like `llms.txt`, an emerging standard similar in spirit to `robots.txt`, but instead of controlling access, it highlights which content on a website is most relevant and useful for AI agents.
+
+We can start the pre-built MCP server with:
+
+```sh
+uvx --from mcpdoc mcpdoc \
+    --urls "LangGraph:https://langchain-ai.github.io/langgraph/llms.txt" "LangChain:https://python.langchain.com/llms.txt" \
+    --transport sse \
+    --port 8082 \
+    --host localhost
+```
+
+Another useful tool in the MCP ecosystem is **MCP Inspector**, a free and open source browser-based tool by also Anthropic to help with debugging and testing MCP servers. It shows things like exposed resources, prompt, and tools, lets you invoke tools to see what happens, and more. We can look into our locally running MCP server with MCP inspector with `npx @modelcontextprotocol/inspector`
+
+![](./images/mcp-inspector.png)
+
+We can click then interact with MCP inspector, for `mcpdoc` it exposes two tools `list_doc_sources` and `fetch_docs` we can play with to work with `llms.txt` files. This is what behaviours are exposed to a client.
+
+Here's an example config that we use on the client side to connect it to our MCP server:
+
+```json
+{
+  "mcpServers": {
+    "langgraph-docs-mcp": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "mcpdoc",
+        "mcpdoc",
+        "--urls",
+        "LangGraph:https://langchain-ai.github.io/langgraph/llms.txt LangChain:https://python.langchain.com/llms.txt",
+        "--transport",
+        "stdio"
+      ]
+    }
+  }
+}
+```
+
+> Note: this JSON is NOT defining the MCP protocol, that is on the MCP server and we haven't seen it since we didn't build the `mcpdoc` server. This config will work in some clients like Cursor (`~/.cursor/mcp.json`), and the Claude desktop app (`~/Library/Application Support/Claude/claude_desktop_config.json`), but is not universally standardized. This configuration simply tells a client how to launch and connect to that server.
+
+## Building MCP Clients & Servers
+
+Now lets actually build with MCP using LangChain. We do this using [LangChain MCP Adapters](https://github.com/langchain-ai/langchain-mcp-adapters). The reason for the adapter pattern is to bridge the gap between LangChain native tools, and MCP tools, which expand upon what LangChain tools offer on their own with resources, prompts, and more.
+
+Lets create a new project and `pip install langchain-mcp-adapters langgraph langchain-openai`
+
+Now, let's create a simple MCP servers, `math_server.py` :
+
+`math_server.py`:
+```python
+from mcp.server.fastmcp import FastMCP  
+  
+mcp = FastMCP("Math")  
+  
+@mcp.tool()  
+def add(a: int, b: int) -> int:  
+    """Add two numbers"""  
+    return a + b  
+  
+@mcp.tool()  
+def multiply(a: int, b: int) -> int:  
+    """Multiply two numbers"""  
+    return a * b  
+  
+if __name__ == "__main__":  
+    mcp.run(transport="stdio")
+```
+
+Finally, let's create `main.py` to act as a client:
+
+`main.py`
+```python
+import asyncio  
+import os  
+  
+from dotenv import load_dotenv  
+from langchain_core.messages import HumanMessage  
+from langchain_mcp_adapters.tools import load_mcp_tools  
+from langchain_openai import ChatOpenAI  
+from langchain.agents import create_agent  
+from mcp import ClientSession, StdioServerParameters  
+from mcp.client.stdio import stdio_client  
+  
+load_dotenv()  
+  
+llm = ChatOpenAI()  
+  
+stdio_server_params = StdioServerParameters(  
+    command="python",  
+    args=["/Users/tylerliquornik/Desktop/learning/langchain-learning/mcp-starter-project/servers/math_server.py"],  
+)  
+  
+async def main():  
+    async with stdio_client(stdio_server_params) as (read,write):  
+        async with ClientSession(read_stream=read, write_stream=write) as session:  
+            await session.initialize()  
+            print("session initialized")  
+            tools = await load_mcp_tools(session)  
+  
+            agent = create_agent(llm,tools)  
+  
+            query_result = await agent.ainvoke({"messages": [HumanMessage(content="What is 54 + (2 * 3)?")]})  
+            print(query_result["messages"][-1].content)  
+  
+if __name__ == "__main__":  
+    asyncio.run(main())
+```
+
+When we run `main.py`, we get:
+
+```sh
+Processing request of type ListToolsRequest
+session initialized
+Processing request of type CallToolRequest
+Processing request of type CallToolRequest
+The result of 54 + (2 * 3) is 54 + 6 = 60.
+```
+
+> We can see 2 tool calls, probably one for the `add` tool and one for the `multiply` tool, but remember you can always go back to LangSmith to look into these incase you notice your agent is making unexpected tool calls (wrong order, wrong input parameters, wrong amount of calls, etc.)
+
+## LangChain's own MCP Server
+
+One more cool thing. Notice across this LangChain course itself, the code has been inconsistent: I am doing these modules several months apart, the course instructor has uploaded the modules all at different times months apart, and LangChain itself is getting updated all the time. Going forward, you'll probably be using agentic coding tools a lot (Cursor, Codex, Claude Code, etc.), and those agentic coding tools will themselves make mistakes writing LangChain code if they don't have up to date information about LangChain, since they each have different training cutoff dates. To solve this, LangChain has its own MCP server we can use to provide a knowledge base on LangChain itself! You can connect to the LangChain MCP server at  https://docs.langchain.com/mcp.
+
+If you go to https://docs.langchain.com/mcp in the browser you can see the MCP discovery payload the server sends to the client (the "OpenAPI" like part of MCP). This exposes the MCP capabilities schema, which is the discovery layer of the protocol and describes the server’s available tools, resources, and prompts. This allows clients and LLMs to understand what the server can do and how to invoke it. Remember however, the full MCP protocol also includes the message exchange layer (e.g., tool call requests and responses) and the transport layer (e.g., stdio or HTTP), which handle how clients actually communicate with the server.
+
+`docs.langchain.com/mcp`:
+```json
+{
+  "server": {
+    "name": "Docs by LangChain",
+    "version": "1.0.0",
+    "transport": "http"
+  },
+  "capabilities": {
+    "tools": {
+      "search_docs_by_lang_chain": {
+        "name": "search_docs_by_lang_chain",
+        "description": "Search across the Docs by LangChain knowledge base to find relevant information, code examples, API references, and guides. Use this tool when you need to answer questions about Docs by LangChain, find specific documentation, understand how features work, or locate implementation details. The search returns contextual content with titles and direct links to the documentation pages. If you need the full content of a specific page, use the get_page tool with the page path from the search results.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "A query to search the content with."
+            }
+          },
+          "required": [
+            "query"
+          ]
+        },
+        "operationId": "mintlify_default_search"
+      },
+      "get_page_docs_by_lang_chain": {
+        "name": "get_page_docs_by_lang_chain",
+        "description": "Retrieve the full content of a specific documentation page from Docs by LangChain by its path. Use this tool when you already know the page path (e.g., from search results) and need the complete content of that page rather than just a snippet.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "page": {
+              "type": "string",
+              "description": "The page path to retrieve (e.g., 'api-reference/create-customer'). Use the page paths returned from the search tool results."
+            }
+          },
+          "required": [
+            "page"
+          ]
+        },
+        "operationId": "mintlify_default_get_page"
+      }
+    },
+    "resources": [],
+    "prompts": []
+  }
+}
+```
