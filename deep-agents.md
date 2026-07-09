@@ -222,3 +222,238 @@ There are four pieces to remember:
 |`thread_id`|Identifies the saved run state. Resume with the same `thread_id`.|
 |`Command(resume=...)`|Continues the paused run with the human decision.|
 
+## The Deep Agent Environment
+
+A deep agent runs inside an environment where it can store files, run commands, and optionally execute code inside the agent loop.
+
+A Deep Agent environment comes with:
+- A filesystem for reading and writing files.
+- A shell, optionally. Exposed through the `execute` tool when the environment supports command execution.
+- An interpreter, optionally. A separate capability for running code inside the agent loop.
+
+###### File System
+
+A filesystem gives the agent a place to work. It can use files as a scratchpad for notes, intermediate results, plans, and generated artifacts.
+
+Deep Agents always provide filesystem tools such as `ls`, `read_file`, `write_file`, `edit_file`, `glob`, and `grep`. The agent sees the same tool surface even if the backend implementation changes.
+
+That backend detail matters when you care where files live, but this lesson only needs the core idea: the filesystem is always part of the environment.
+
+###### Shell
+
+A shell lets the agent run commands through the `execute` tool: scripts, tests, package commands, and other process-level work. This is powerful, so the implementation matters.
+
+Different backends can provide different implementations of `execute`. Two common families are:
+
+**Sandbox providers** run commands in isolated environments such as containers, VMs, or remote sandboxes. This limits what code can affect compared with running directly on your machine, but safety still depends on sandbox configuration, network access, credentials, and provider isolation.
+
+**Local shell** runs commands directly on your machine. It has no isolation overhead and can access local resources, but it should be used only when that local access is actually required.
+
+The key distinction: `execute` does not inherently mean to run locally; it runs wherever the configured backend says commands should run.
+
+###### Interpreter
+
+An interpreter is different from a shell. It does not run through the backend. It is a separate tool/capability inside the agent loop.
+
+Use an interpreter when the agent needs code-like control flow without starting a full shell process. For example, instead of asking the model to call a tool 100 times, the interpreter can run a loop, collect intermediate results in variables, and return only the final summary to the model.
+
+Most agent work alternates between model reasoning and tool calls. A model can fire several tool calls in one turn, but that batch is fixed the moment it is emitted. Nothing can loop, branch on a result, retry a failure, or feed one call's output into the next without another model turn, and every result returns to the model's context.
+
+Interpreters give the agent a runtime for that work. A loop runs every iteration, intermediate values stay in variables, and only a compact result returns to the model.
+
+#### Filesystem Backends
+
+Now that you have seen the environment surface, we can name the implementation layer.
+
+The **environment** is what the agent sees: filesystem tools, optional `execute`, and optional interpreter. The **backend** is what implements the filesystem and optional shell behind that environment.
+
+A backend answers questions like:
+- where do files live?
+- is `execute` available?
+- if `execute` is available, where do commands run?
+
+There is an abstract backend interface with multiple implementations. Some implementations only provide filesystem storage. Some also provide shell execution. Shell execution can be backed by a local shell or by different sandbox providers.
+
+The key point is that the agent's tool surface can stay the same while the backend changes. The agent can still call `read_file` or `write_file`; the backend decides what those calls mean underneath.
+
+The interpreter is not part of this backend layer. It is a separate capability added to the agent loop.
+
+![filesystem-backend](./images/filesystem-backend.png)
+
+You can select from different backends to implement:
+- **StateBackend**: the default. Files live in the agent's saved state for the current thread. This is fast and zero-config, and it is good for scratch work.
+- **FilesystemBackend / local disk**: reads and writes files on the local disk, scoped to a `root_dir` you specify. Use it when the agent should work with real files in a local directory.
+- **CompositeBackend**: routes different path prefixes to different backends. It lets one agent use StateBackend for normal scratch files while routing a specific directory, such as `/reference/`, to local disk.
+- **Custom backend**: implement the backend interface yourself to plug in another storage system, such as S3, GitHub, or a proprietary store.
+
+Pass any backend directly to `create_deep_agent`. If you do not pass one, Deep Agents uses `StateBackend()` by default.
+
+```python
+from deepagents import create_deep_agent
+from deepagents.backends import FilesystemBackend
+
+agent = create_deep_agent(
+    model=model,
+    backend=FilesystemBackend(root_dir="/path/to/project", virtual_mode=True),
+)
+```
+
+Sometimes one backend is not enough. You may want ordinary scratch files to stay in thread state, but a specific directory to map to real local files.
+
+`CompositeBackend` resolves this by routing path prefixes to different backends. Everything not matched by a route falls through to the `default` backend.
+
+```python
+from pathlib import Path
+
+from deepagents import create_deep_agent
+from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
+
+reference_dir = Path(__file__).parent / "reference"
+
+agent = create_deep_agent(
+    model=model,
+    backend=CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/reference/": FilesystemBackend(
+                root_dir=str(reference_dir),
+                virtual_mode=True,
+            ),
+        },
+    ),
+)
+```
+
+> `/reference/notes.md` goes to a local file at `reference/notes.md`, Everything else goes to `StateBackend`, scoped to the current thread's saved state
+
+###### Permissions
+
+Permissions are enforced in code, not in the prompt. The model cannot bypass them. Pass a list of `FilesystemPermission` rules to `create_deep_agent`; rules are evaluated in order and the first match wins. If nothing matches, the operation is allowed.
+
+Each rule has three fields:
+
+| Field        | Values                             | Default   | Description                                                                                    |
+| ------------ | ---------------------------------- | --------- | ---------------------------------------------------------------------------------------------- |
+| `operations` | `"read"`, `"write"`                | -         | `"read"` covers `ls`, `read_file`, `glob`, `grep`. `"write"` covers `write_file`, `edit_file`. |
+| `paths`      | glob patterns                      | -         | e.g. `["/reference/**"]`. Supports `**` and `{a,b}` alternation.                               |
+| `mode`       | `"allow"`, `"deny"`, `"interrupt"` | `"allow"` | `"interrupt"` pauses for human approval instead of blocking.                                   |
+```python
+from pathlib import Path
+
+from deepagents import FilesystemPermission, create_deep_agent
+from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
+
+reference_dir = Path(__file__).parent / "reference"
+
+agent = create_deep_agent(
+    model=model,
+    backend=CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/reference/": FilesystemBackend(
+                root_dir=str(reference_dir),
+                virtual_mode=True,
+            ),
+        },
+    ),
+    permissions=[
+        FilesystemPermission(
+            operations=["write"],
+            paths=["/reference/**"],
+            mode="deny",
+        ),
+    ],
+)
+```
+
+> The agent can read `/reference/`, but it cannot write to it. Other paths still use the default `StateBackend` route.
+
+#### Sandbox and LocalShell Backends
+
+The filesystem backends from the last lesson give the agent file tools: `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`. `LocalShellBackend` and sandbox backends add one more: **`execute`**, which runs shell commands.
+
+![shell-backend](./images/shell-backend.png)
+
+Shell-capable backends expose an `execute(command)` tool. The agent calls it to run scripts it has written, invoke CLI tools, and compile and test code. The combined command output, exit code, and execution metadata come back as a tool result on the next LLM call.
+
+###### How do you choose between LocalShell and Sandboxes?
+
+Sandboxes are used for isolation. They are designed to let agents execute code, access files, and use the network away from your host machine. They are safer than running directly on your machine, but safety still depends on sandbox configuration, network access, credentials, and provider isolation.
+
+In LangSmith Sandboxes, credentials are kept out of the sandbox entirely via an **auth proxy** pattern: the sandbox code makes API calls with no authentication headers, and a proxy sidecar intercepts outbound requests and injects the credentials on the way out. Secrets never enter the sandbox. The agent cannot exfiltrate what it cannot see.
+
+Sandboxes are especially useful for:
+- **Coding agents:** Agents that run autonomously can use shell, git, clone repositories (many providers offer native git APIs, e.g., Daytona's git operations), and run Docker-in-Docker for build and test pipelines
+- **Data analysis agents:** Load files, install data analysis libraries (pandas, numpy, etc.), run statistical calculations, and create outputs like PowerPoint presentations in a safe, isolated environment
+
+`LocalShellBackend` gives the agent access to the local filesystem and shell. Even with filesystem path scoping, the `execute` tool runs with host permissions; file scoping does not limit what shell commands can do. Unless your intention is to build a desktop agent designed to work on local files and commands, a sandbox is a better choice.
+
+#### Sandbox Backends
+
+A sandbox is a temporary, isolated workspace containing a filesystem, command execution environment, and other resources. Sandbox backends run commands inside that workspace instead of on your host machine.
+
+There are two models for using a sandbox with an agent:
+
+![sandbox-backend](./images/sandbox-backend.png)
+
+#### LocalShell Backends
+
+`LocalShellBackend` runs commands directly on the host machine. It can scope filesystem _tools_ to a `root_dir`, but `execute` itself runs with host permissions; no process isolation is applied.
+
+Use `virtual_mode=True` when you want filesystem tools (`ls`, `read_file`, `write_file`, etc.) to be path-scoped under `root_dir`. Either way, `root_dir` does not restrict the `execute` tool. Shell commands run with host permissions and can access paths outside the filesystem-tool root. That's why LocalShellBackend is unsuitable for production or untrusted input.
+
+This backend grants agents direct filesystem read/write access and unrestricted shell execution on your host. Use with extreme caution and only in appropriate environments.
+
+**Appropriate use cases:**
+
+- Local development CLIs (coding assistants, development tools)
+- Personal development environments where you trust the agent's code
+- CI/CD pipelines with proper secret management
+
+**Inappropriate use cases:**
+
+- Production environments (such as web servers, APIs, multi-tenant systems)
+- Processing untrusted user input or executing untrusted code
+
+**Note:** `virtual_mode=True` provides no security with shell access enabled, since commands can access any path on the system.
+
+## Interpreters
+
+**Interpreters are a lighter-weight code execution option compared to backends.** They embed a JavaScript runtime directly in the agent loop with no cloud infrastructure and no API calls to spin up a shell environment. The tradeoff is a narrower direct capability set: JavaScript standard library only, no external packages, no direct filesystem, and no direct network access.
+
+When `CodeInterpreterMiddleware` is added to an agent, it provides a single new tool: **`eval`**. The agent calls it with a string of JavaScript to execute. The middleware runs the code in a [QuickJS](https://bellard.org/quickjs/) runtime, a lightweight JavaScript engine designed for embedded execution. The result of the last expression, plus any `console.log` output, comes back as the tool result.
+
+QuickJS makes the following JavaScript function / packages avaialble:
+- Array methods: `map`, `filter`, `reduce`, `sort`, `flat`, `find`  
+- `Map`, `Set`, `JSON`, `Math`, `Promise`  
+- `Date` and other standard JavaScript globals  
+- `console.log` (captured and returned as output)  
+- String and number methods, destructuring, `async`/`await`
+
+QuickJS does not have available:
+- Filesystem (`fs`)  
+- Network (`fetch`)  
+- Node.js APIs  
+- `npm` packages
+
+The interpreter state persists across `eval` calls within the same thread. Variables defined in one call are available in the next.
+
+Interpreter execution is bounded by runtime limits such as timeout, memory, output size, and PTC call limits. Those limits keep runaway loops or huge results from taking over the agent run.
+
+Good use cases for interpreters includes:
+- Data transformation: When the agent has data in context and needs to compute something (sort, group, aggregate, reformat), `eval` is faster and more reliable than asking the LLM to do arithmetic in prose.
+- Programmatic Tool Calling (PTC): JavaScript code can call the agent's tools directly, without those intermediate results ever entering the LLM's context window
+
+###### Interpreter vs shell-capable backend
+
+| Capability         | Interpreter                                                               | Shell-capable backend / sandbox                                    |
+| ------------------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Language           | JavaScript (QuickJS)                                                      | Any shell command or installed runtime                             |
+| External libraries | JS standard library directly; more only through allowlisted tools         | Packages available in the environment                              |
+| Filesystem         | No direct filesystem API; can only access files through allowlisted tools | Filesystem tools plus shell access when supported                  |
+| Network            | No direct network API; can only access network through allowlisted tools  | Depends on backend and sandbox/network configuration               |
+| Infrastructure     | Embedded in the agent process                                             | Local shell or external sandbox resource                           |
+| State              | Persists within thread                                                    | Persists within the shell/sandbox workspace until reset or deleted |
+| Best for           | Computation, loops, PTC orchestration                                     | Scripts, packages, file I/O, builds, tests, arbitrary shell work   |
+
+Use an interpreter when the task is logic and orchestration. Use a shell-capable backend or sandbox when the task requires packages, filesystem operations from code, network access, or arbitrary command execution.

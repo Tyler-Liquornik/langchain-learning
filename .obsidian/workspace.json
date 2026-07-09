@@ -4,11 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "3495472d8bdabe19",
+        "id": "99d7f2489ee0e062",
         "type": "tabs",
         "children": [
           {
-            "id": "f153b3092e23a75b",
+            "id": "650b6d88618778d5",
             "type": "leaf",
             "state": {
               "type": "markdown",
@@ -183,8 +183,12 @@
       "bases:Create new base": false
     }
   },
-  "active": "f153b3092e23a75b",
+  "active": "9f3e5a3c3e655fad",
   "lastOpenFiles": [
+    "images/sandbox-backend.png",
+    "images/shell-backend.png",
+    "images/filesystem-backend.png",
+    "deep-agents.md",
     "langchain-academy-deep-agents/lca-deepagents/python/__pycache__/models.cpython-314.pyc",
     "langchain-academy-deep-agents/lca-deepagents/python/__pycache__",
     "pyproject.toml",
@@ -195,7 +199,6 @@
     "langchain-academy-deep-agents/lca-deepagents/python/lca_deepagents_python.egg-info/PKG-INFO",
     "langchain-academy-deep-agents/lca-deepagents/python/lca_deepagents_python.egg-info",
     "langchain-academy-deep-agents/lca-deepagents/python/m1/m1.8_hitl_respond.py",
-    "langchain-academy-deep-agents/lca-deepagents/thinkific/src/shared/sd-components.js",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m5/images/m5.3-make-graph-sandbox-anatomy.svg",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m5/images/m5.3-make-graph-anatomy.svg",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m5/m5.3-the-sales-assistant.md",
@@ -207,10 +210,8 @@
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m4/images/m4.1-two-capabilities.svg",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m4/images/m4.1-humans-fanout.svg",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m4/images/m4.1-context-isolation.svg",
-    "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m4/images/m4.1-agents-fanout.svg",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m4/m4.2-building-a-subagent-team.md",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m4/m4.1-delegation.md",
-    "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m3/images/m3.x-summarization2.svg",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m3/m3.3-memory.md",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m3/m3.2-skills.md",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m3/m3.1-summarization-context-offloading.md",
@@ -229,7 +230,6 @@
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m1/m1.1-overview.md",
     "langchain-academy-deep-agents/lca-deepagents/thinkific/src/m0/m0.1-setup-python.md",
     "langchain-academy-deep-agents/lca-deepagents/python/m5/sales_assistant/skills/weekly-newsletter/SKILL.md",
-    "langchain-academy-deep-agents/lca-deepagents/python/m5/sales_assistant/skills/territory-report/SKILL.md",
-    "langchain-academy-deep-agents/lca-deepagents/python/m5/sales_assistant/skills/rfq-quote/SKILL.md"
+    "langchain-academy-deep-agents/lca-deepagents/python/m5/sales_assistant/skills/territory-report/SKILL.md"
   ]
 }
