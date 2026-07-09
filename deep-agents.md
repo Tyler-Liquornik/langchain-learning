@@ -731,3 +731,63 @@ Common scoping patterns:
 |User within workspace|`("memory", workspace_id, user_id)`|Users have private preferences inside a workspace|
 |Assistant + user|`("memory", assistant_id, user_id)`|The same user may have different memories for different assistants|
 Choose the scope deliberately. If private user memories share the same namespace, one user's preferences or context can leak into another user's agent run. If shared team memory is scoped too narrowly, the agent will fail to reuse conventions that should apply across the workspace.
+
+## Delegation
+
+Long-running agents need coordination. A big task can span many steps, tool calls, files, and intermediate results. Without an explicit way to track the plan and isolate specialized work, the main agent can drift or overload its context.
+
+Use a subagent when:  
+- A multi-step task would otherwise clutter the main agent's context  
+- The work needs a specialized domain: custom instructions or its own tools  
+- A subtask is better served by a different model  
+- You want the main agent to stay focused on high-level coordination
+
+Skip the subagent when:  
+- The task is simple and single-step, so the overhead isn't worth it  
+- You need to keep the intermediate context, not just the final result
+
+###### Planning
+
+A capable model can draft a solid plan for a multi-step job. The hard part is follow-through. As the conversation grows and the agent juggles tool calls and intermediate results, it tends to drift, losing track of what's already done and what's still left.
+
+Deep Agents addresses this with a built-in **`write_todos`** tool. The agent writes its plan out as a structured to-do list and updates each item's status as it works:
+- **`pending`**: not started yet
+- **`in_progress`**: being worked on now
+- **`completed`**: done
+
+The list is saved in the agent's state. Across turns, it persists when you use the same thread with a checkpointer, following the thread pattern introduced earlier in the course. On a long task the agent always has an explicit, up-to-date plan to check against instead of trying to hold the whole thing in its head. Think of it as writing the steps on a whiteboard and ticking them off as it goes.
+
+Planning is not delegation. It is the supervisor's task list: a way for the main agent to keep itself organized before, during, and after tool calls.
+
+###### Delegation
+
+When a project is too big for one person, we bring in a team. The same applies to agents.
+
+A few things make this work:
+- **A supervisor splits the work and pulls it back together.** They break the project into subtasks, hand each one out, and combine what comes back.
+- **Each person brings their own expertise.** A researcher, a writer, and a designer each see the problem differently and carry their own tools.
+- **People work in parallel.** Three people working at once finish in roughly a third of the time. BUT a common saying is more engineers is not always better, thats why its *roughly* a third, because of collaboration tax, which can be minimized IF the team manager is effective!
+- **Each person focuses on their piece, not the whole project.** The writer doesn't need to hold the entire plan in their head, just their assignment.
+
+We achieve delegation with **subagents**. A **subagent** is a full agent the main agent can call to do a focused task and report back. It can have its own instructions, tools, skills, model, and isolated context. The team pattern carries straight over.
+- **The main agent splits work and aggregates results.** Say the job is _"write a newsletter summarizing this week's news on a topic."_ The main agent can hand each sub-topic to a different subagent. Each one searches, summarizes what it finds, and passes back only the summary, which the main agent stitches into the final newsletter.
+- **Each subagent is a full agent in its own right.** It can have its own system prompt, its own skills, its own tools, and it can even run on a different model than the main agent.
+- **Subagents run in parallel.** In Deep Agents, a subagent is invoked like a tool, so the main agent can fire off as many as it needs at the same time.
+- **Each subagent focuses on its own task and its own context.** This is what makes subagents a context-engineering tool.
+
+Deep Agents exposes subagents through a built-in `task` tool. To the main agent, delegating looks just like calling any other tool. The main agent calls `task` with an assignment and gets a result back, picking which subagent to use from each one's description, the same way it decides to call any other tool.
+
+###### Context Isolation
+
+**Context Isolation** is what makes subagents a context-engineering tool. A subagent does its work without cluttering the main agent's context:
+- A subagent receives **one message** from the main agent describing its task. Importantly, it does **not** inherit the main agent's message history.
+- It runs autonomously until the task is done, then returns **one message** back: its final result. LangChain Deep Agent subagents are stateless. They can't carry on a back-and-forth with the main agent.
+- A subagent defines **its own tool set**. Consider a database expert with dozens of specialized tools. Putting those behind a subagent keeps every one of those tool descriptions _out_ of the main agent's context. All the main agent has to know is that this needs database expertise. It hands off the task and gets back an answer.
+
+The payoff: a large, messy subtask gets compressed into a single clean result, as long as the subagent is told to return a concise summary. The main agent's context stays focused on coordination, even as the work piles up behind the scenes.
+
+###### Synchronous vs. Asynchronous
+
+Subagents can run in two modes. The choice comes down to one question: **does the main agent need the result before it can keep going?**.
+- **Synchronous** subagents complete their task within the step. The main agent blocks until the longest-running subagent returns. It's the simplest model, but the conversation pauses while the work happens.
+- **Asynchronous** subagents run in the background. The main agent launches the job, stays responsive, and checks on it later, collecting the result once it's ready. It's more responsive but has more moving parts.
