@@ -1,4 +1,4 @@
-
+> Disclaimer: The content here comes from LangChain Academy's Deep Agents introductory course. The majority of if is copied directly from the course, with some of my thoughts and notes sprinkled throughout, and paraphrasing and choice omission of passages at times too.
 ## Learning Goal  
 
 Use the Deep Agents framework as a batteries included, opinionated framework to build effective custom agent harnesses without spending too much manual effort on making design decisions that have already been implemented probably better than I could by previous AI engineers which come up commonly in agent harness design.
@@ -222,7 +222,7 @@ There are four pieces to remember:
 |`thread_id`|Identifies the saved run state. Resume with the same `thread_id`.|
 |`Command(resume=...)`|Continues the paused run with the human decision.|
 
-## The Deep Agent Environment
+## The Execution Environment
 
 A deep agent runs inside an environment where it can store files, run commands, and optionally execute code inside the agent loop.
 
@@ -457,3 +457,277 @@ Good use cases for interpreters includes:
 | Best for           | Computation, loops, PTC orchestration                                     | Scripts, packages, file I/O, builds, tests, arbitrary shell work   |
 
 Use an interpreter when the task is logic and orchestration. Use a shell-capable backend or sandbox when the task requires packages, filesystem operations from code, network access, or arbitrary command execution.
+
+## Context Management
+
+There are many methods of doing context management that together prevent from overloading the a deep agent's context window while ensuring the right context is loaded at the right time for the given task.
+
+#### Summarization
+
+Long-running agents accumulate large message histories. Summarization works on messages in the context window and intelligently summarizes them. Offloading intercepts messages (human or tool messages) before they are inserted into context and saves them to the filesystem, inserting a pointer to the information in the context. These are detailed below.
+
+When the context hits 85% (by default), the middleware picks a cutoff point that keeps the most recent messages intact and summarizes older messages into a single block. The messages being summarized are appended to /conversation_history/{thread_id}.md on the filesystem. The summary message the model receives includes a link to that file, so the agent can read those older sections back with read_file if it needs the detail. Because a summary is far more compact than the messages it replaces, the token count drops sharply and the conversation can continue. This is equivalent to `/compact` with Claude Code.
+
+A summary containts:
+- **Session intent**: what the user is trying to accomplish
+- **Key facts & decisions**: important context from the conversation
+- **Artifacts**: files or resources created or modified
+- **Next steps**: what remains to do
+
+#### Context Offloading
+
+Summarization compacts messages that have already accumulated in context. Offloading handles a different case: a single large input. Instead of letting it land in context, **FilesystemMiddleware** intercepts oversized content before it reaches the model. It writes the full data to the filesystem and leaves behind a short preview plus a file path. The agent reads the full content with `read_file` only when it needs it.
+
+Two kinds of data are offloaded this way: large **tool results** and large **human messages**.
+
+###### Tool Call Offloading
+
+A single tool call can return a large result, such as a full database export, hundreds of search matches, or a long code generation output. Storing it inline would use a large share of the context window at once.
+
+**FilesystemMiddleware** handles this automatically with tool result offloading. When a tool returns a result that exceeds roughly **20,000 tokens**, the middleware:
+
+1. Writes the full result to `/large_tool_results/<tool_call_id>` on the agent's filesystem
+2. Replaces the inline `ToolMessage` with a short preview (first and last 5 lines) and a file reference
+
+The preview looks something like:
+```
+Tool result too large, the result of this tool call <id> was saved in the
+filesystem at this path: /large_tool_results/<tool_call_id>
+
+You can read the result from the filesystem by using the read_file tool,
+but make sure to only read part of the result at a time.
+
+Here is a preview showing the head and tail of the result:
+
+     1  | SELECT id, name, email FROM users WHERE ...
+     2  | 1, Alice, alice@example.com
+     3  | 2, Bob, bob@example.com
+     4  | 3, Carol, carol@example.com
+     5  | 4, Dave, dave@example.com
+... [1 823 lines truncated] ...
+  1828  | 1827, Zara, zara@example.com
+  1829  | 1828, Zoe, zoe@example.com
+  1830  | 1829, ...
+```
+
+The agent can then call `read_file` with `offset` and `limit` to page through the full result on demand - reading only the portion that is relevant rather than loading everything into context at once.
+
+The tools `ls`, `glob`, `grep`, `read_file`, `edit_file`, and `write_file` are excluded from offloading. They either have their own built-in truncation, return minimal confirmation text, or (for `read_file`) re-reading a truncated file would not help.
+
+###### Human Message Offloading
+
+The same mechanism applies when a _user_ message is very large, for example pasting in a long document or transcript. When a human message exceeds roughly **50,000 tokens**, FilesystemMiddleware writes the full text to `/conversation_history/` and replaces it in the model's view with a preview and a file reference. The agent can `read_file` that path to retrieve the full message on demand.
+
+The behavior the agent sees, a preview plus a pointer, is identical to a tool result. Only the threshold (50k vs 20k tokens) and the storage location differ.
+
+#### Skills
+
+A skill is a directory containing a `SKILL.md` file. Skills follow an [open standard](https://agentskills.io/specification) maintained by many players like OpenAI, Microsoft, Google, Cursor, and more. They are portable across agents and shareable across teams.
+
+A skill directory looks like:
+```
+skill-name/
+├── SKILL.md          # Required: metadata + instructions
+├── scripts/          # Optional: executable code
+├── references/       # Optional: documentation
+├── assets/           # Optional: templates, resources
+└── ...               # Any additional files or directories
+```
+
+The `SKILL.md` file has two parts: a YAML frontmatter block at the top, and the skill instructions below it. The agent reads only the frontmatter at startup; the full body is loaded when a skill is activated. Write the `description` to clearly answer when the skill should be used. Keep it brief and specific.
+
+Frontmatter fields in the official skill spec is as follows:
+
+|Field|Required|Notes|
+|---|---|---|
+|`name`|yes|Lowercase, alphanumeric, hyphens only. Must match the directory name.|
+|`description`|yes|Describes when to use this skill. Kept brief; always in context.|
+|`allowed-tools`|no|Space-separated list of tool names the skill may use.|
+|`compatibility`|no|Environment or version requirements.|
+|`metadata`|no|Arbitrary key-value pairs.|
+###### Progressive Disclosure
+
+Skills use a three-stage pattern to keep the agent's context lean:
+
+**1. Discovery**
+
+The SDK reads the `name` and `description` from each skill's frontmatter and automatically injects them into the system prompt on every call. You do not write this section; the SDK generates it. Simplified, it looks like this:
+
+```sql
+## Skills System
+
+Available skills:
+- **qualify-lead**: Use when the user wants to qualify a sales lead or prospect.
+  -> Read skills/qualify-lead/SKILL.md for full instructions.
+- **draft-pitch**: Use when the user wants to write a sales pitch or outreach message.
+  -> Read skills/draft-pitch/SKILL.md for full instructions.
+```
+
+Both the `name` and `description` are always in context, so keep them short and precise. The `description` in particular should describe only **when** to use the skill, not what it does internally.
+
+**2. Activation**
+
+When a task matches a skill's description, the agent calls `read_file` on the path shown in the system prompt, loading the full `SKILL.md` into context for that turn. The full content is not loaded automatically; the agent reads it on demand.
+
+**3. Execution**
+
+The agent follows the instructions in the skill body, calling any tools it needs and using any bundled files referenced in the instructions.
+
+You can see all three stages in a LangSmith trace: the Skills System section appears in every system message; the `read_file` call marks the moment of activation; and the subsequent tool calls show execution.
+
+
+
+Once you author skills, put them into the agent'ts backend and register them:
+
+```python
+from deepagents.backends import FilesystemBackend
+
+backend = FilesystemBackend(root_dir="/path/to/agent-files", virtual_mode=True)
+
+agent = create_deep_agent(
+    model=model,
+    backend=backend,
+    skills=["/skills"],
+)
+```
+
+At runtime, the agent:
+1. Sees all skill names and descriptions in the system prompt
+2. Matches the user request to a skill description
+3. Calls `read_file` on that skill's `SKILL.md`
+4. Follows the full instructions in the skill body
+
+#### Memory
+
+Memory lets an agent carry durable knowledge across conversations: user preferences, project conventions, team workflows, recurring facts, and instructions the base model would not know on its own.
+
+> Like a s
+> 
+> ystem prompt, memory files are always loaded into context
+
+The key distinction is:
+
+- **Checkpointers preserve thread history**: messages and state within a conversation thread.
+- **Memory preserves durable knowledge**: file-backed facts and instructions that can be loaded into future runs, including different threads when the backend scope allows it.
+
+In Deep Agents, memory is plain files on the agent filesystem. The common convention is a markdown file such as `/memories/AGENTS.md`. For example:
+
+```markdown
+# Project Guidelines
+
+## Code Style
+- Use type annotations
+- Prefer pathlib.Path for file operations
+
+## Workflow
+- Run tests with: uv run pytest
+```
+
+The agent can update memory with the same filesystem tools it already knows, especially `edit_file`. There is no separate memory database API for the agent to learn.
+
+The `memory` argument tells Deep Agents which files should be treated as memory:
+
+```python
+agent = create_deep_agent(
+    model=model,
+    memory=["/memories/AGENTS.md"],
+)
+```
+
+Without `memory=[...]`, the file may still exist in a backend, but it is not loaded into the system prompt as agent memory.
+
+Passing `memory=[...]` creates `MemoryMiddleware` behind the scenes.
+
+For each run, the middleware:
+
+1. Loads the configured memory files from the backend
+2. Stores the loaded contents in agent state
+3. Appends the combined memory to the system prompt inside an `<agent_memory>` block on each model call in that run
+
+Here's a breakdown of Memory vs. Skills
+
+|                              | Memory                         | Skills                                     |
+| ---------------------------- | ------------------------------ | ------------------------------------------ |
+| What is always visible?      | Loaded memory content          | Skill names and descriptions               |
+| When is full content loaded? | Proactively for the run        | On demand when the agent activates a skill |
+| Typical use                  | Durable facts and instructions | Reusable workflows and procedures          |
+
+###### How memory is updated
+
+The middleware also adds instructions telling the agent when to persist new information. When a user says "remember this" or provides context that should carry forward, the agent can call `edit_file` on one of the paths passed to `memory=[...]`.
+
+That write updates the backend file. The new content is available after memory is reloaded in a later run.
+
+A typical memory write looks like:
+
+```text
+User: Remember: the team switched to ruff for linting.
+Agent: edit_file('/memories/AGENTS.md', ...)
+```
+
+Only store information that is safe and useful in future conversations. Do not store secrets such as API keys, credentials, tokens, or passwords.
+
+###### Where memory lives
+
+The backend controls where memory files are stored. A common production pattern is to use a `CompositeBackend`: keep normal working files in the default backend, and route a dedicated `/memories/` directory to durable storage.
+
+```python
+from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
+from langgraph.store.memory import InMemoryStore
+
+store = InMemoryStore()
+
+
+def memory_namespace(runtime):
+    user_id = runtime.context["user_id"]
+    workspace_id = runtime.context["workspace_id"]
+    return ("memory", workspace_id, user_id)
+
+
+agent = create_deep_agent(
+    model=model,
+    backend=CompositeBackend(
+        default=StateBackend(),
+        routes={"/memories/": StoreBackend(namespace=memory_namespace)},
+    ),
+    store=store,
+    memory=["/memories/AGENTS.md"],
+)
+```
+
+In this setup, `/memories/AGENTS.md` is the logical path the agent sees. The `CompositeBackend` routes that path into `StoreBackend`, so memory persists beyond a single thread. Other working files can still use the default backend.
+
+`StateBackend` is thread-scoped, so it is useful for temporary working files but not for durable long-term memory. `InMemoryStore()` is only for local development; in production, the store is usually backed by durable infrastructure.
+
+###### Scoping memory
+
+The `StoreBackend` namespace on the `/memories/` route determines which durable memory files the agent sees. In a real application, you usually derive that namespace from runtime context such as the authenticated user, workspace, tenant, or assistant ID.
+
+For example, a user-and-workspace scoped namespace might look like this:
+
+```python
+def memory_namespace(runtime):
+    user_id = runtime.context["user_id"]
+    workspace_id = runtime.context["workspace_id"]
+    return ("memory", workspace_id, user_id)
+```
+
+Then invoke the agent with that context:
+
+```python
+agent.invoke(
+    {"messages": [{"role": "user", "content": "Remember that I prefer concise answers."}]},
+    context={"user_id": "u_123", "workspace_id": "acme"},
+)
+```
+
+Common scoping patterns:
+
+|Scope|Namespace shape|Use when...|
+|---|---|---|
+|Shared assistant memory|`("memory", assistant_id)`|Everyone should share the same durable instructions|
+|User memory|`("memory", user_id)`|Preferences should follow one user across threads|
+|Workspace memory|`("memory", workspace_id)`|A team/project should share conventions|
+|User within workspace|`("memory", workspace_id, user_id)`|Users have private preferences inside a workspace|
+|Assistant + user|`("memory", assistant_id, user_id)`|The same user may have different memories for different assistants|
+Choose the scope deliberately. If private user memories share the same namespace, one user's preferences or context can leak into another user's agent run. If shared team memory is scoped too narrowly, the agent will fail to reuse conventions that should apply across the workspace.
