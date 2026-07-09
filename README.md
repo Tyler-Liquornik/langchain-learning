@@ -10,4 +10,6 @@ In 2026, an added goal is learning to use the batteries included Deep Agents fra
 
 ## Notes:
 
-Please find my notes in langchain.md for LangChain and LanGraph, and deep-agents.md for the Deep Agents framework.
+Please find my notes in langchain.md for LangChain and LangGraph, and deep-agents.md for the Deep Agents framework.
+
+LangChain & LangGraph Notes come from Eden Marco's Udemy Course, while Langchain's Deep Agents framework notes come from LangChain Academy
