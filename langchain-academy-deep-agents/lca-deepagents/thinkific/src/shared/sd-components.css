@@ -1,0 +1,275 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=IBM+Plex+Mono:wght@300;400;500&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+.lesson {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 60px 28px 120px;
+}
+
+p { margin-bottom: 18px; }
+
+.callout {
+  border-left: 3px solid #006DDD;
+  background: #E5F4FF;
+  padding: 14px 20px;
+  border-radius: 0 6px 6px 0;
+  margin: 28px 0;
+  font-size: 15.5px;
+  color: #030710;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid #CCE9FF;
+  margin: 40px 0;
+}
+
+/* ── Sequence Diagram Component ── */
+.sd-wrap {
+  margin: 40px 0;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(3,7,16,0.08), 0 12px 40px rgba(3,7,16,0.16);
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+.sd-stage {
+  background: #030710;
+  cursor: pointer;
+  outline: none;
+}
+
+.sd-stage svg { width: 100%; height: auto; display: block; }
+
+/* Step states */
+.step { transition: opacity 0.3s ease; }
+.step-hidden  { opacity: 0; pointer-events: none; }
+.step-past    { opacity: 1; }
+.step-current { opacity: 1; }
+
+/* Sequence diagram element colors */
+.al  { stroke: #40668D; fill: none; }
+.at  { fill: #40668D; }
+.ab  { fill: #161F34; stroke: #2F4B68; }
+.abt { fill: #40668D; }
+
+.step-past .al  { stroke: #B2DEFF; }
+.step-past .at  { fill: #B2DEFF; }
+.step-past .ab  { fill: #161F34; stroke: #40668D; }
+.step-past .abt { fill: #B2DEFF; }
+
+.step-current .al  { stroke: #7FC8FF; }
+.step-current .at  { fill: #CCE9FF; }
+.step-current .ab  { fill: #0D1322; stroke: #7FC8FF; }
+.step-current .abt { fill: #CCE9FF; }
+
+/* Architecture diagram element colors (light background) */
+.aa  { stroke: #40668D; fill: none; }
+.aat { fill: #40668D; }
+.aab { fill: #161F34; stroke: #2F4B68; }
+.aac { fill: #B2DEFF; }
+.aak { fill: #7FC8FF; }
+
+.step-current .aa  { stroke: #006DDD; }
+.step-current .aat { fill: #030710; }
+.step-current .aab { fill: #0D1322; stroke: #006DDD; }
+.step-current .aac { fill: #E5F4FF; }
+.step-current .aak { fill: #7FC8FF; }
+
+.step-past .aa  { stroke: #40668D; }
+.step-past .aat { fill: #40668D; }
+.step-past .aab { fill: #161F34; stroke: #40668D; }
+.step-past .aac { fill: #99D3FF; }
+.step-past .aak { fill: #7FC8FF; }
+
+/* Caption bar */
+.sd-bar {
+  background: #F2FAFF;
+  border-top: 1px solid #CCE9FF;
+  padding: 14px 18px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.sd-caption {
+  font-size: 14px;
+  line-height: 1.6;
+  color: #030710;
+  min-height: 3em;
+}
+
+.sd-caption strong {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: #40668D;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.sd-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.sd-btn {
+  width: 32px; height: 32px;
+  border-radius: 6px;
+  border: 1.5px solid #CCE9FF;
+  background: #F2FAFF;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: #030710;
+  font-size: 13px;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.sd-btn:hover:not(:disabled) {
+  background: #006DDD;
+  border-color: #006DDD;
+  color: #F2FAFF;
+}
+
+.sd-btn:disabled { opacity: 0.25; cursor: default; }
+
+.sd-dots {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  padding: 8px 18px 13px;
+  background: #F2FAFF;
+  border-top: 1px solid #E5F4FF;
+  flex-wrap: wrap;
+}
+
+.sd-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #CCE9FF;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s, transform 0.2s;
+}
+
+.sd-dot.active { background: #006DDD; transform: scale(1.5); }
+
+.mobile-note {
+  display: none;
+  font-size: 12px;
+  color: #40668D;
+  text-align: center;
+  padding: 8px;
+  background: #F2FAFF;
+  border-top: 1px solid #E5F4FF;
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+@media (max-width: 600px) { .mobile-note { display: block; } }
+
+/* ── Slideshow Component ── */
+.ss-stage { background: #fff; line-height: 0; }
+.ss-img   { width: 100%; height: auto; display: block; }
+.ss-cap p { margin: 0 0 8px; }
+.ss-cap p:last-child { margin-bottom: 0; }
+
+/* ── Details / expandable blocks ── */
+details {
+  border: 1px solid #CCE9FF;
+  border-radius: 6px;
+  background: #F2FAFF;
+  margin: 20px 0;
+}
+details > summary {
+  padding: 10px 16px;
+  cursor: pointer;
+  font-weight: 600;
+  color: #006DDD;
+  list-style: none;
+  border-radius: 6px;
+}
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before {
+  content: '▶';
+  display: inline-block;
+  margin-right: 7px;
+  font-size: 0.65em;
+  transition: transform 0.2s;
+  vertical-align: 1px;
+}
+details[open] > summary::before { transform: rotate(90deg); }
+details[open] > summary {
+  border-bottom: 1px solid #CCE9FF;
+  border-radius: 6px 6px 0 0;
+}
+details > *:not(summary) { padding: 0 16px; }
+
+/* ── MCQ: hide ✅ emoji in answer header (no text presentation in Unicode) ── */
+.mcq-answer-header { font-size: 0 !important; }
+.mcq-answer-header strong { font-size: 1.05rem; }
+
+/* ── Video walk-through blocks (pink) ── */
+details.video-walkthrough {
+  border-color: #F4ABCD;
+  background: #FFF0F7;
+}
+details.video-walkthrough > summary { color: #BE185D; }
+details[open].video-walkthrough > summary { border-bottom-color: #F4ABCD; }
+
+/* ── Tip box: remove bottom margin on last paragraph ── */
+.tip p:last-child { margin-bottom: 0; }
+
+/* ── Code-block copy button: always-visible icon, never overlapping the code ── */
+/* Extra top padding reserves a band for the button so the first line stays clear. */
+pre { padding-top: 2.85rem; }
+pre.no-copy { padding-top: 0.75rem; }
+
+/* Self-contained clipboard icon (inline SVG data-URI) so the button shows even
+   when the pipeline's symbols/copy.png isn't copied next to the page. */
+pre .copy-button-inline {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23cfe8ff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='9' y='9' width='13' height='13' rx='2'/%3E%3Cpath d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'/%3E%3C/svg%3E");
+  background-position: center;
+  background-size: 16px;
+  background-repeat: no-repeat;
+  background-color: rgba(127, 200, 255, 0.14);
+  filter: none;
+  opacity: 0.85;
+  border-radius: 6px;
+}
+
+pre .copy-button-inline:hover {
+  filter: none;
+  opacity: 1;
+  background-color: rgba(127, 200, 255, 0.30);
+}
+
+/* ── Back to Top button ── */
+.back-to-top-btn {
+  display: block;
+  width: 100%;
+  margin: 52px 0 8px;
+  padding: 20px 24px;
+  background: #006DDD;
+  color: #F2FAFF;
+  border: none;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: 'IBM Plex Mono', monospace;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: background 0.15s, transform 0.1s;
+  text-align: center;
+}
+.back-to-top-btn:hover {
+  background: #0059b3;
+  transform: translateY(-2px);
+}
+.back-to-top-btn:active { transform: translateY(0); }
